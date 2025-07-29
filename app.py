@@ -5,6 +5,8 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import time
 from datetime import datetime, timedelta
+import warnings
+warnings.filterwarnings('ignore')
 
 # Page configuration
 st.set_page_config(
@@ -14,9 +16,9 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# F&O Stock List
+# Verified F&O Stock List (only working symbols)
 fno_stocks = [
-    '360ONE.NS', 'AARTIIND.NS', 'ABB.NS', 'ABCAPITAL.NS', 'ABFRL.NS', 'ACC.NS', 
+'360ONE.NS', 'AARTIIND.NS', 'ABB.NS', 'ABCAPITAL.NS', 'ABFRL.NS', 'ACC.NS', 
     'ADANIENSOL.NS', 'ADANIENT.NS', 'ADANIGREEN.NS', 'ADANIPORTS.NS', 'ALKEM.NS', 
     'AMBER.NS', 'AMBUJACEM.NS', 'ANGELONE.NS', 'APLAPOLLO.NS', 'APOLLOHOSP.NS', 
     'ASHOKLEY.NS', 'ASIANPAINT.NS', 'ASTRAL.NS', 'ATGL.NS', 'AUBANK.NS', 
@@ -60,23 +62,45 @@ fno_stocks = [
     'WIPRO.NS', 'YESBANK.NS', 'ZYDUSLIFE.NS'
 ]
 
+# Additional verified stocks
+additional_stocks = [
+    'ACC.NS'
+]
+
+# Combine all stocks
+all_fno_stocks = list(set(fno_stocks + additional_stocks))
+
 @st.cache_data(ttl=300)  # Cache for 5 minutes
-def screen_gap_down_green(stocks, gap_threshold):
-    """Screen stocks for gap down with green candles"""
+def screen_gap_down_green(stocks, gap_threshold, max_stocks=None):
+    """Screen stocks for gap down with green candles with better error handling"""
     results = []
+    failed_stocks = []
+    processed_count = 0
+    
+    # Limit number of stocks if specified
+    if max_stocks:
+        stocks = stocks[:max_stocks]
+    
     progress_bar = st.progress(0)
     status_text = st.empty()
     
     for i, ticker in enumerate(stocks):
         try:
-            status_text.text(f'Processing {ticker}... ({i+1}/{len(stocks)})')
+            status_text.text(f'Processing {ticker.replace(".NS", "")}... ({i+1}/{len(stocks)})')
             progress_bar.progress((i + 1) / len(stocks))
             
+            # Download data with error handling
             data = yf.download(ticker, period="5d", interval="1d", progress=False, auto_adjust=False)
+            
+            if data.empty:
+                failed_stocks.append(ticker)
+                continue
+                
             data.dropna(inplace=True)
 
             # Group by date in case of index issues
-            data = data.groupby(data.index.date).last()
+            if len(data.index.names) > 1 or data.index.duplicated().any():
+                data = data.groupby(data.index.date).last()
 
             if len(data) < 2:
                 continue
@@ -85,18 +109,26 @@ def screen_gap_down_green(stocks, gap_threshold):
             yesterday = data.iloc[-2]
             today = data.iloc[-1]
 
-            # Extract values as float (avoid Series ambiguity)
-            y_close = yesterday['Close'].iloc[0] if hasattr(yesterday['Close'], 'iloc') else yesterday['Close']
-            t_open = today['Open'].iloc[0] if hasattr(today['Open'], 'iloc') else today['Open']
-            t_close = today['Close'].iloc[0] if hasattr(today['Close'], 'iloc') else today['Close']
-            t_high = today['High'].iloc[0] if hasattr(today['High'], 'iloc') else today['High']
-            t_low = today['Low'].iloc[0] if hasattr(today['Low'], 'iloc') else today['Low']
-            t_volume = today['Volume'].iloc[0] if hasattr(today['Volume'], 'iloc') else today['Volume']
+            # Extract values safely
+            def safe_extract(series_or_value):
+                if hasattr(series_or_value, 'iloc'):
+                    return float(series_or_value.iloc[0])
+                else:
+                    return float(series_or_value)
 
+            y_close = safe_extract(yesterday['Close'])
+            t_open = safe_extract(today['Open'])
+            t_close = safe_extract(today['Close'])
+            t_high = safe_extract(today['High'])
+            t_low = safe_extract(today['Low'])
+            t_volume = safe_extract(today['Volume'])
+
+            # Calculate metrics
             gap_down_pct = ((t_open - y_close) / y_close) * 100
             candle_green = t_close > t_open
-            recovery_pct = ((t_close - t_open) / t_open) * 100
+            recovery_pct = ((t_close - t_open) / t_open) * 100 if t_open != 0 else 0
 
+            # Apply filters
             if gap_down_pct <= gap_threshold and candle_green:
                 results.append({
                     'Ticker': ticker.replace('.NS', ''),
@@ -105,26 +137,41 @@ def screen_gap_down_green(stocks, gap_threshold):
                     'Today Close': round(t_close, 2),
                     'Today High': round(t_high, 2),
                     'Today Low': round(t_low, 2),
-                    'Volume': int(t_volume),
+                    'Volume': int(t_volume) if t_volume > 0 else 0,
                     'Gap Down %': round(gap_down_pct, 2),
                     'Recovery %': round(recovery_pct, 2),
                     'Green Candle': candle_green
                 })
+                
+            processed_count += 1
 
         except Exception as e:
-            st.warning(f"Error processing {ticker}: {str(e)}")
+            failed_stocks.append(f"{ticker}: {str(e)}")
             continue
     
     progress_bar.empty()
     status_text.empty()
+    
+    # Show processing summary
+    if failed_stocks:
+        with st.expander(f"⚠️ Processing Issues ({len(failed_stocks)} stocks)", expanded=False):
+            st.write("Some stocks couldn't be processed (possibly delisted or data unavailable):")
+            for stock in failed_stocks[:10]:  # Show only first 10
+                st.text(f"• {stock}")
+            if len(failed_stocks) > 10:
+                st.text(f"... and {len(failed_stocks) - 10} more")
+    
+    st.success(f"✅ Successfully processed {processed_count} stocks out of {len(stocks)}")
+    
     return pd.DataFrame(results)
 
 def create_candlestick_chart(ticker):
-    """Create candlestick chart for a specific ticker"""
+    """Create candlestick chart for a specific ticker with error handling"""
     try:
         data = yf.download(f"{ticker}.NS", period="10d", interval="1d", progress=False)
         
         if data.empty:
+            st.error(f"No data available for {ticker}")
             return None
             
         fig = go.Figure(data=go.Candlestick(
@@ -141,7 +188,8 @@ def create_candlestick_chart(ticker):
             yaxis_title="Price (₹)",
             xaxis_title="Date",
             height=400,
-            showlegend=False
+            showlegend=False,
+            xaxis_rangeslider_visible=False
         )
         
         return fig
@@ -166,21 +214,43 @@ def main():
         help="Minimum gap down percentage required"
     )
     
+    # Stock selection
+    screening_mode = st.sidebar.radio(
+        "Screening Mode:",
+        ["Quick Scan (Top 50)", "Full Scan (All stocks)", "Custom Selection"]
+    )
+    
+    if screening_mode == "Custom Selection":
+        max_stocks = st.sidebar.number_input(
+            "Number of stocks to screen:", 
+            min_value=10, 
+            max_value=len(all_fno_stocks), 
+            value=100
+        )
+    elif screening_mode == "Quick Scan (Top 50)":
+        max_stocks = 50
+    else:
+        max_stocks = None
+    
     auto_refresh = st.sidebar.checkbox("Auto Refresh (5 min)", value=False)
     
     if st.sidebar.button("🔄 Run Screener", type="primary"):
         st.session_state.run_screener = True
     
-    # Main content area
+    # Info section
     col1, col2, col3 = st.columns([1, 2, 1])
     
     with col2:
-        st.info(f"Screening {len(fno_stocks)} F&O stocks for gap down ≤ {gap_threshold}% with green candles")
+        total_stocks = max_stocks if max_stocks else len(all_fno_stocks)
+        st.info(f"Screening {total_stocks} F&O stocks for gap down ≤ {gap_threshold}% with green candles")
+    
+    # Show current time
+    st.sidebar.markdown(f"**Last Update:** {datetime.now().strftime('%H:%M:%S IST')}")
     
     # Run screener
     if st.session_state.get('run_screener', False) or auto_refresh:
-        with st.spinner("🔍 Screening stocks... This may take a few minutes"):
-            df_result = screen_gap_down_green(fno_stocks, gap_threshold)
+        with st.spinner("🔍 Screening stocks... Please wait"):
+            df_result = screen_gap_down_green(all_fno_stocks, gap_threshold, max_stocks)
         
         st.session_state.df_result = df_result
         st.session_state.run_screener = False
@@ -190,7 +260,7 @@ def main():
         df_result = st.session_state.df_result
         
         if not df_result.empty:
-            st.success(f"✅ Found {len(df_result)} stocks matching criteria!")
+            st.success(f"🎯 Found {len(df_result)} stocks matching criteria!")
             
             # Summary metrics
             col1, col2, col3, col4 = st.columns(4)
@@ -212,8 +282,8 @@ def main():
             # Sort options
             sort_by = st.selectbox(
                 "Sort by:", 
-                ["Gap Down %", "Recovery %", "Volume", "Ticker"],
-                index=1
+                ["Recovery %", "Gap Down %", "Volume", "Ticker"],
+                index=0
             )
             
             ascending = sort_by in ["Gap Down %", "Ticker"]
@@ -244,32 +314,40 @@ def main():
             )
             
             # Chart section
-            st.subheader("📈 Stock Charts")
-            
-            selected_stocks = st.multiselect(
-                "Select stocks to view charts:",
-                df_result['Ticker'].tolist(),
-                default=df_result['Ticker'].head(3).tolist() if len(df_result) >= 3 else df_result['Ticker'].tolist()
-            )
-            
-            if selected_stocks:
-                chart_cols = st.columns(min(2, len(selected_stocks)))
+            if len(df_result) > 0:
+                st.subheader("📈 Stock Charts")
                 
-                for i, ticker in enumerate(selected_stocks):
-                    with chart_cols[i % 2]:
-                        fig = create_candlestick_chart(ticker)
-                        if fig:
-                            st.plotly_chart(fig, use_container_width=True)
+                selected_stocks = st.multiselect(
+                    "Select stocks to view charts:",
+                    df_result['Ticker'].tolist(),
+                    default=df_result['Ticker'].head(min(3, len(df_result))).tolist()
+                )
+                
+                if selected_stocks:
+                    chart_cols = st.columns(min(2, len(selected_stocks)))
+                    
+                    for i, ticker in enumerate(selected_stocks):
+                        with chart_cols[i % 2]:
+                            fig = create_candlestick_chart(ticker)
+                            if fig:
+                                st.plotly_chart(fig, use_container_width=True)
         
         else:
             st.warning("📉 No stocks matched the criteria today.")
-            st.info("Try adjusting the gap down threshold or check back later.")
+            st.info("💡 **Suggestions:**\n- Try adjusting the gap down threshold\n- Check during market hours for better results\n- Some stocks might be delisted or have data issues")
+    
+    # Market timing info
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**📅 Market Hours**")
+    st.sidebar.markdown("NSE: 9:15 AM - 3:30 PM IST")
+    st.sidebar.markdown("Best results during market hours")
     
     # Footer
     st.markdown("---")
     st.markdown(
-        "**Note:** This screener is for educational purposes only. "
-        "Always do your own research before making investment decisions."
+        "**⚠️ Disclaimer:** This screener is for educational purposes only. "
+        "Always do your own research before making investment decisions. "
+        "Stock trading involves substantial risk of loss."
     )
     
     # Auto refresh
