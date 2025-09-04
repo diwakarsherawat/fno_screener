@@ -56,7 +56,7 @@ Plotly
 
 Clone this repository:
 
-git clone https://github.com/your-username/gap-down-green-candle-screener.git
+git clone https://github.com/diwakarsherawat/fno_screener.git
 cd gap-down-green-candle-screener
 
 
